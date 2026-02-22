@@ -2,37 +2,40 @@
 
 import re
 from typing import Optional, Tuple, Dict, Any
-import torch
-from transformers import AutoTokenizer, AutoModel
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
+
+# BERT and cosine similarity model loading disabled - only external LLM API calls used
+# import torch
+# from transformers import AutoTokenizer, AutoModel
+# from sklearn.metrics.pairwise import cosine_similarity
+# import numpy as np
 
 
 class SimilarityComparator:
-    """Service for comparing text similarity using ModernBert embeddings."""
+    """Service for comparing text similarity using ModernBert embeddings (or Jaccard fallback)."""
     
     def __init__(self):
-        """Initialize the similarity comparator with ModernBert model."""
+        """Initialize the similarity comparator. Model loading disabled - uses Jaccard fallback."""
         self.model_name = "answerdotai/ModernBERT-base"
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = "cpu"
+        self.tokenizer = None
+        self.model = None
         
-        # Load tokenizer and model
-        print(f"Loading ModernBert model: {self.model_name} on {self.device}...")
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoModel.from_pretrained(self.model_name)
-            self.model.to(self.device)
-            self.model.eval()  # Set to evaluation mode
-            print("ModernBert model loaded successfully!")
-        except Exception as e:
-            print(f"Warning: Could not load ModernBert model: {e}")
-            print("Falling back to CPU-only mode or alternative model...")
-            # Try without GPU
-            self.device = "cpu"
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoModel.from_pretrained(self.model_name)
-            self.model.to(self.device)
-            self.model.eval()
+        # BERT/cosine similarity model loading commented out - only external LLM API calls are used
+        # print(f"Loading ModernBert model: {self.model_name} on {self.device}...")
+        # try:
+        #     self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        #     self.model = AutoModel.from_pretrained(self.model_name)
+        #     self.model.to(self.device)
+        #     self.model.eval()  # Set to evaluation mode
+        #     print("ModernBert model loaded successfully!")
+        # except Exception as e:
+        #     print(f"Warning: Could not load ModernBert model: {e}")
+        #     print("Falling back to CPU-only mode or alternative model...")
+        #     self.device = "cpu"
+        #     self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        #     self.model = AutoModel.from_pretrained(self.model_name)
+        #     self.model.to(self.device)
+        #     self.model.eval()
     
     def preprocess_text(self, text: str) -> str:
         """
@@ -51,43 +54,18 @@ class SimilarityComparator:
         text = re.sub(r'\s+', ' ', text.strip())
         return text
     
-    def _get_embeddings(self, text: str) -> np.ndarray:
-        """
-        Get ModernBert embeddings for a text.
-        
-        Args:
-            text: Text to encode
-            
-        Returns:
-            Numpy array of embeddings (mean pooled)
-        """
-        # Tokenize and encode
-        inputs = self.tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-            padding=True
-        )
-        
-        # Move inputs to device
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
-        # Get embeddings
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            # Use mean pooling of all token embeddings (excluding padding)
-            # Get attention mask to exclude padding tokens
-            attention_mask = inputs['attention_mask']
-            # Sum embeddings, excluding padding
-            embeddings = outputs.last_hidden_state * attention_mask.unsqueeze(-1)
-            # Sum and divide by number of non-padding tokens
-            sum_embeddings = embeddings.sum(dim=1)
-            sum_mask = attention_mask.sum(dim=1, keepdim=True)
-            mean_pooled = sum_embeddings / sum_mask
-        
-        # Convert to numpy and return
-        return mean_pooled.cpu().numpy()[0]
+    # BERT embeddings disabled - uncomment when re-enabling model
+    # def _get_embeddings(self, text: str) -> np.ndarray:
+    #     inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512, padding=True)
+    #     inputs = {k: v.to(self.device) for k, v in inputs.items()}
+    #     with torch.no_grad():
+    #         outputs = self.model(**inputs)
+    #         attention_mask = inputs['attention_mask']
+    #         embeddings = outputs.last_hidden_state * attention_mask.unsqueeze(-1)
+    #         sum_embeddings = embeddings.sum(dim=1)
+    #         sum_mask = attention_mask.sum(dim=1, keepdim=True)
+    #         mean_pooled = sum_embeddings / sum_mask
+    #     return mean_pooled.cpu().numpy()[0]
     
     def calculate_similarity(
         self,
@@ -115,45 +93,13 @@ class SimilarityComparator:
             return 1.0, {"note": "Both texts are empty", "method": "modernbert"}
         
         if not processed_text1 or not processed_text2:
-            return 0.0, {"note": "One text is empty", "method": "modernbert"}
+            return 0.0, {"note": "One text is empty", "method": "jaccard_fallback"}
         
-        try:
-            # Get embeddings for both texts
-            embedding1 = self._get_embeddings(processed_text1)
-            embedding2 = self._get_embeddings(processed_text2)
-            
-            # Reshape for cosine_similarity (needs 2D array)
-            embedding1 = embedding1.reshape(1, -1)
-            embedding2 = embedding2.reshape(1, -1)
-            
-            # Calculate cosine similarity
-            similarity_matrix = cosine_similarity(embedding1, embedding2)
-            similarity_score = float(similarity_matrix[0][0])
-            
-            # Ensure score is between 0 and 1 (cosine similarity can be -1 to 1)
-            # For semantic similarity, we typically normalize to 0-1 range
-            similarity_score = max(0.0, similarity_score)  # Clamp to 0-1
-            
-            # Calculate additional metrics
-            text1_length = len(processed_text1.split())
-            text2_length = len(processed_text2.split())
-            length_ratio = min(text1_length, text2_length) / max(text1_length, text2_length) if max(text1_length, text2_length) > 0 else 0
-            
-            metadata = {
-                "similarity_score": similarity_score,
-                "text1_length": text1_length,
-                "text2_length": text2_length,
-                "length_ratio": length_ratio,
-                "method": "modernbert_semantic_similarity",
-                "model": self.model_name,
-                "device": self.device
-            }
-            
-            return similarity_score, metadata
-            
-        except Exception as e:
-            # Fallback to simple word overlap if embedding fails
-            return self._fallback_similarity(processed_text1, processed_text2, str(e))
+        # BERT/cosine similarity disabled - use Jaccard fallback only
+        return self._fallback_similarity(
+            processed_text1, processed_text2,
+            "BERT/cosine similarity models disabled - using Jaccard fallback"
+        )
     
     def _fallback_similarity(
         self,
